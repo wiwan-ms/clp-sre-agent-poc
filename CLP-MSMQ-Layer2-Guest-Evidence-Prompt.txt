@@ -1,0 +1,317 @@
+===============================================================================
+CLP MSMQ DISCOVERY - LAYER 2: WINDOWS, QUEUES, CONSUMERS, AND DEPENDENCIES
+===============================================================================
+
+ROLE
+You are the Azure SRE Agent analyzing customer-reviewed guest discovery bundles
+from the CLP-SMP MSMQ receiver VMs. CLP collected the bundles locally with the
+approved Collect-CLP-MsmqDiscovery.ps1 script and transferred them through an
+approved channel.
+
+OBJECTIVE
+Reconstruct the current MSMQ queue topology, identify consumer services and
+processes as far as the evidence permits, map downstream dependencies, compare
+all receivers for configuration drift, and define what Layer 3 must measure.
+
+The central performance model is:
+
+  change in queue depth = message arrival rate - successful consumption rate
+
+A growing queue does not by itself prove an MSMQ platform bottleneck. It may
+indicate slow or failed consumers, transaction latency, downstream blocking,
+retries, uneven routing, storage latency, quota/capacity limits, or service
+unavailability.
+
+ACCESS AND SAFETY BOUNDARY
+- Analyze only the uploaded, CLP-reviewed bundles and supplied documentation.
+- Do not invoke VM Run Command, RDP, PowerShell, remote registry, WMI/CIM,
+  service control, queue operations, network tests, or Azure resource changes.
+- Do not request Contributor access for the SRE Agent.
+- Do not display credentials, secrets, message bodies, private keys, or raw
+  sensitive configuration. Report suspected redaction failures immediately.
+- If a ZIP or required file is unreadable, missing, or hash-invalid, report the
+  affected host and continue with clearly reduced confidence.
+
+EXPECTED RECEIVER SET
+Group A:
+- VSMPAAPP-EASP01
+- VSMPAAPP-EASP02
+- VSMPAAPP-EASP03
+- VSMPAAPP-EASP04
+
+Group B:
+- VSMPSBS-EASP01
+- VSMPSBS-EASP02
+- VSMPSBS-EASP03
+- VSMPSBS-EASP04
+
+Do not assume all eight hosts are active or identical. If a host such as
+VSMPSBS-EASP04 was deallocated and no bundle exists, record it as unavailable,
+not healthy and not misconfigured.
+
+LAYER 1 CURRENT-STATE FINDINGS TO TEST
+- The packaging-time Azure Monitor window was
+  `2026-07-19T07:00:00Z/2026-08-18T07:00:00Z` at `PT1H`. It is current-state
+  proxy evidence only, not September 2025 incident evidence or MSMQ message
+  counts.
+- AAPP is the primary distribution concern. `VSMPAAPP-EASP01` had `1.31x` the
+  average CPU and `3.33x` the average inbound flows of
+  `VSMPAAPP-EASP02`. AAPP01 and AAPP03 also appeared persistently among the
+  higher-network receivers. Determine whether this reflects producer/connection
+  affinity, direct-backend addressing, different queue ownership/message mix,
+  consumer behavior, retries, or downstream waits.
+- SBS01-03 were comparatively balanced for CPU and inbound flows. Do not assume
+  an SBS distribution fault unless guest evidence demonstrates one. SBS03 had
+  relatively higher outbound traffic, which may indicate a different response
+  or application role.
+- Layer 1 found no LB rule or probe using TCP 1801. AAPP TCP/443 uses
+  `SourceIP`; TCP/808 uses `Default`. Test whether the actual production path
+  uses either application rule and writes to local MSMQ, uses native MSMQ/direct
+  format names, or addresses individual receivers.
+- Datadog is not approved as an evidence source for this phase. Do not request,
+  depend on, or query Datadog. Use only the CLP-reviewed collector bundles and
+  supplied documentation.
+
+EXPECTED INPUTS PER HOST
+- CLP-MSMQ-Discovery-<HOST>-latest-result.json
+- CLP-MSMQ-Discovery-<HOST>-<UTC>.zip
+- manifest.json
+- file-hashes.csv
+- collection-errors.csv
+- msmq-services.csv
+- msmq-queues.csv, or msmq-queues-unavailable.txt
+- msmq-registry.csv
+- Win32_PerfFormattedData_msmq_*.json
+- msmq-outgoing-queues.csv when available
+- volumes.csv and physical-disks.csv
+- services.csv and processes.csv
+- service-binary-inventory.csv and scheduled-tasks.csv
+- application-config-inventory.csv
+- application-endpoint-hints.csv
+- tcp-connections.csv, listener-owners.csv, and udp-endpoints.csv
+- iis-websites.csv, iis-bindings.csv, iis-applications.csv,
+  iis-config-inventory.csv, iis-application-endpoint-hints.csv, and
+  iis-service-files.csv when IIS is installed; otherwise iis-unavailable.txt
+- http-sys-service-state.txt, http-sys-urlacl.txt, and http-sys-sslcert.txt
+- hosts-file-overrides.csv
+- dns-client-cache.csv
+- network-adapters.csv, ipv4-routes.csv, ipv6-routes.csv,
+  msmq-firewall-rules.csv, msmq-firewall-port-filters.csv, and
+  msmq-firewall-address-filters.csv
+- msdtc-services.csv and msdtc-*.json
+- defender-exclusions.json, or defender-unavailable.txt
+- azure-extension-status.csv
+- events-*.csv
+- installed-software.csv and windows-features.csv
+
+INPUT VALIDATION
+1. Verify each ZIP SHA-256 against latest-result.json.
+2. Verify extracted file hashes against file-hashes.csv.
+3. Record script version, collection UTC window, status, elevation state,
+   warnings, failed sections, and whether performance capture was skipped.
+  Version 1.2.6 is expected for the v2-specific ingress/listener assessment.
+  Accept a 1.2.5 bundle as older evidence, but mark the listener ownership,
+  IIS/HTTP.sys, scheduled-task, hosts-override, extension-status, service-binary,
+  UDP/IPv6, exact historical-window, and direct queue-depth coverage as reduced.
+  Request recollection only when the missing evidence affects a decision.
+4. Separate missing evidence caused by collector limitations from evidence that
+   positively shows a feature is absent.
+5. Reject cross-host timing comparisons when collection windows do not overlap;
+   static configuration comparisons remain valid.
+
+ANALYSIS TASKS
+
+1. Build the queue inventory
+For every host and queue, record:
+- Queue name, path and format name.
+- Private/public visibility where determinable.
+- Transactional setting, journaling, queue quota, journal quota, label, and
+  multicast configuration.
+- Current message depth from msmq-queues.csv and message/byte depth when exposed
+  by formatted MSMQ counters. Reconcile discrepancies by timestamp; do not
+  silently choose one point-in-time value.
+- Outgoing queue destination, state, message count, next hop, and last error.
+- Dead-letter, transactional dead-letter, journal, retry, or error evidence
+  available from queue inventory and events.
+
+Do not read or request message bodies.
+
+2. Verify MSMQ storage and capacity
+- Use msmq-registry.csv to identify the actual reliable log, log, journal,
+  dead-letter, and persistent storage paths.
+- Map each path to its volume and calculate current free-space risk.
+- Record machine and outgoing queue quotas.
+- Compare AAPP and SBS storage placement and configuration.
+- Treat Azure P10/P20 limits as Layer 1 context; guest files prove paths and
+  current configuration, not September 2025 saturation.
+
+3. Identify consumer candidates
+Build a queue-to-consumer evidence chain using:
+- Running Windows services, service executable paths, service accounts, state,
+  start mode, process IDs, and exit codes.
+- Non-Microsoft or MSMQ/message-related scheduled tasks, their actions, run
+  identity, state, triggers, and last result.
+- Running processes, parent process, executable path, creation time, thread
+  count, and working set.
+- Service executable file/product version and SHA-256 drift across peers.
+- Configuration inventory and sanitized WCF, SQL, HTTP, host, and UNC endpoint
+  hints located beside service executables.
+- MSMQ and application event providers that identify a service, executable,
+  queue, retry, exception, or transaction participant.
+- Listening and established TCP connections mapped to owning process.
+- Installed application names and versions.
+
+Classify each consumer mapping:
+- Confirmed: explicit configuration or event evidence names both the queue and
+  the service/process, or CLP supplies an authoritative application mapping.
+- Probable: service/config/process evidence strongly aligns but does not name
+  both ends.
+- Possible: only timing, naming, or co-location suggests the relationship.
+- Unknown: no defensible mapping exists.
+
+Do not label the MSMQ Windows service itself as the business consumer. MSMQ
+stores and delivers messages; the application service or process removes and
+processes them.
+
+The current collector may identify consumer candidates without proving which
+process calls Receive(). If proof is absent, preserve the gap and request one
+of the following targeted, customer-approved inputs:
+- Application owner queue-to-service mapping.
+- Sanitized relevant application configuration.
+- Read-only code/deployment manifest showing the queue binding.
+- Application logs or traces that name queue and consumer.
+- Customer-approved application or service monitoring evidence supplied by CLP.
+
+3A. Determine the production ingress-to-queue path
+- For each AAPP and SBS receiver, map TCP listeners on 443, 808, and 1801, plus
+  discovered SBS UDP listeners, to owning PID, executable, Windows service, IIS
+  site/application, HTTP.sys request queue/URL registration, and SSL binding.
+- Use IIS application roots, deployed .svc metadata, sanitized web.config
+  endpoint hints, service configuration, scheduled tasks, and active
+  connections to test whether a 443/808 application writes to a local MSMQ
+  queue or whether producers use native MSMQ/direct format names.
+- Check hosts-file overrides, DNS cache, MSMQ format names, outgoing queues,
+  and endpoint settings for ILB VIP/DNS versus individual backend addressing.
+- Treat `CommandProcessorService.svc` and `InboundMessageProcessor.svc` only as
+  Layer 1 health-probe paths until guest configuration or CLP application-owner
+  evidence identifies the deployed service and production use. A matching .svc
+  filename proves deployment, not traffic or a local MSMQ write.
+- Classify each hop as Confirmed, Probable, Possible, or Unknown and cite the
+  exact host/file/field. Do not infer the path from an open port alone.
+- For AAPP, explicitly explain why AAPP01 had materially more inbound flows than
+  AAPP02. Compare listener ownership, established producer tuples, local queue
+  placement/depth, service/process presence, configuration and binary hashes,
+  endpoint/format names, and consumer/downstream evidence across AAPP01-04.
+- For SBS, first test whether the three active hosts are functionally similar.
+  Investigate SBS03's higher outbound activity as a possible role difference;
+  do not interpret top-two rank alone as imbalance in a three-host active pool.
+
+4. Map downstream dependencies
+- Correlate service and IIS endpoint hints, process-owned established
+  connections, hosts overrides, DNS cache, IPv4/IPv6 routes, WCF endpoints, and
+  relevant events.
+- For each consumer candidate, list SQL/database, API, file/UNC, WCF, COM/MSDTC,
+  on-premises, and Azure resource dependencies.
+- Match IPs and FQDNs to Layer 1 Azure resources only when an explicit mapping
+  exists. Network reachability or DNS caching alone is not proof of use.
+- Revisit the two Layer 1 storage accounts. Confirm an application dependency
+  only if a consumer configuration, active process connection, or other direct
+  guest evidence identifies the account endpoint. Otherwise keep their role
+  operational/unknown as determined by Layer 1.
+
+5. Assess transaction and retry risk
+- Identify transactional queues and whether MSDTC is installed, running, and
+  network-enabled.
+- Correlate event evidence for aborts, timeouts, unavailable coordinators,
+  authentication/name-resolution errors, poison handling, repeated failures,
+  service restarts, and outgoing delivery errors.
+- MSDTC being enabled is not proof that a queue consumer uses a distributed
+  transaction. Require application or event evidence for that conclusion.
+
+6. Assess endpoint-security interaction
+- Determine whether Microsoft Defender exclusions cover the verified MSMQ
+  storage paths and candidate consumer executables.
+- If a third-party EDR is installed, state that Defender exclusions do not
+  represent the third-party policy. Request the authoritative EDR exclusion
+  policy from CLP.
+- Do not recommend changing exclusions solely from this discovery. Record the
+  risk and the evidence required for security review.
+
+6A. Validate guest monitoring-agent state
+- Compare azure-extension-status.csv, installed software, services, processes,
+  and collection errors for AMA, Azure diagnostics, Dependency Agent, Datadog,
+  and legacy MMA health.
+- Distinguish extension handler success from an operational telemetry path. A
+  successful handler does not prove DCR association, data ingestion, counter
+  coverage, or Datadog delivery.
+
+7. Detect configuration drift and partial failure
+Compare all available receivers for:
+- Queue definitions and quotas.
+- MSMQ registry and storage paths.
+- Service state, start mode, identity, executable path, and exit code.
+- Application/configuration file hashes and versions.
+- Service binary versions/hashes, scheduled-task actions, IIS bindings,
+  deployed .svc files, HTTP.sys registrations, and hosts-file overrides.
+- Process presence and thread count.
+- MSDTC configuration.
+- Defender exclusions and installed EDR agents.
+- Firewall rules, routes, DNS and dependency endpoints.
+- Recent MSMQ/application events.
+
+Do not average away a single unhealthy host. Report outliers individually and
+compare AAPP only with AAPP and SBS only with SBS before comparing the pools.
+
+REQUIRED OUTPUTS
+
+1. Collection-quality table
+Host, collection time, script version, status, elevation, failed/missing
+sections, hash validation, and analysis limitations.
+
+2. Queue topology table
+Host, pool, queue, transactional, depth, quota, storage path, outgoing state,
+and notable events.
+
+3. Consumer evidence matrix
+Queue, host, candidate service/process, executable, evidence, confidence,
+version/config hash, state, and unresolved proof needed.
+
+3A. Ingress-to-queue path matrix
+Pool, host, frontend protocol/port, guest listener owner, IIS/HTTP.sys mapping,
+deployed service/config evidence, destination/format name, local queue mapping,
+ILB/direct/unknown path, confidence, and unresolved proof needed.
+
+4. Dependency matrix
+Consumer candidate, endpoint/FQDN/IP, dependency type, owning process,
+supporting files, Azure resource match, confidence, and bottleneck mechanism.
+
+5. Fleet drift report
+Expected common configuration, outlier host, observed difference, performance
+or reliability implication, evidence, and recommended owner.
+
+6. Current bottleneck-risk assessment
+Rank only evidence-supported current risks. For each one provide observations,
+alternative explanations, confidence, and the Layer 3 measurement that could
+confirm or reject it. Do not claim a September 2025 root cause.
+
+7. Updated application-flow diagram
+- Preserve confirmed Layer 1 Azure relationships.
+- Add queues, confirmed/probable consumer services, and downstream endpoints.
+- Use solid lines for confirmed relationships and dashed lines for probable or
+  possible relationships.
+- Put confidence and evidence source on each non-Azure relationship.
+- Leave visible unknown placeholders rather than inventing missing consumers.
+
+8. Layer 3 capture plan
+Specify which active hosts, queues, consumer processes, disks, and downstream
+connections must be measured in one coordinated window. Identify missing
+counters or application telemetry that the current collector cannot provide.
+
+EVIDENCE RULES
+- Cite host, file, field, event provider/ID, and collection timestamp.
+- Do not equate service presence with message consumption.
+- Do not equate thread count with configured receive concurrency.
+- Do not equate an open connection with downstream latency.
+- Do not equate MSDTC configuration with MSDTC participation.
+- Do not infer historical incident behavior from current state.
+===============================================================================
